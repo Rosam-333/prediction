@@ -31,7 +31,6 @@ from easy_investment_core import (
     REQUEST_HEADERS,
     SECTOR_EXPOSURES,
     STOCK_MARKET_BENCHMARK,
-    TRADING_DAYS,
     build_prediction_signal,
     build_relevance_terms,
     build_sp500_screener,
@@ -43,7 +42,6 @@ from easy_investment_core import (
     compute_ivol_percentile,
     deduplicate_articles,
     download_close_batches,
-    extract_close,
     fetch_fundamentals_analysis,
     fetch_yahoo_headlines,
     format_market_caption,
@@ -55,15 +53,6 @@ from easy_investment_core import (
     load_asset_vs_benchmark,
     render_date_messages,
 )
-
-TRADING_DAYS_PER_QUARTER = max(1, int(round(TRADING_DAYS / 4)))
-# Trading sessions after the sample end date (not calendar “tomonth” exactly).
-FORWARD_DIRECTION_HORIZONS = (
-    (1, "Tomorrow"),
-    (21, "After about a month"),
-    (TRADING_DAYS_PER_QUARTER, "After about three months"),
-)
-
 
 def _crypto_short_name(ui_label: str, yahoo_ticker: str) -> str:
     """Strip trailing ' (TICKER)' from Streamlit select labels like 'Bitcoin (BTC-USD)'."""
@@ -1623,222 +1612,6 @@ def get_news_context(
     }
 
 
-@st.cache_data(show_spinner=False)
-def download_asset_close_slice(asset_ticker, start, end, refresh_run_key=""):
-    raw = yf.download(asset_ticker, start=start, end=end, auto_adjust=True, progress=False, threads=True)
-    if raw.empty:
-        return None
-    close = extract_close(raw, asset_ticker)
-    if close is None or close.empty:
-        return None
-    return close.sort_index()
-
-
-def _forward_return_direction_label(r, band=0.005):
-    """Map cumulative return after sample end to a simple increase / decrease / flat label."""
-    if r is None or not np.isfinite(r):
-        return "No data", None
-    if r > band:
-        return "Increase", r
-    if r < -band:
-        return "Decrease", r
-    return "Little change", r
-
-
-def build_forward_direction_snapshot(metrics, asset_ticker, refresh_run_key=""):
-    """
-    For each horizon: direction of the close vs the end-of-sample close (historical, not a crystal ball).
-    Horizons count trading sessions after the sample end date.
-    If the sample end is very recent, there may be fewer than 21 / 63 sessions before “today”; we then use
-    the latest available close (partial horizon) when there is a real multi-session window beyond “tomorrow”.
-    """
-    actual_end_d = pd.Timestamp(metrics["actual_end"]).date()
-    today = pd.Timestamp.today().normalize().date()
-    snapshots = []
-    error = None
-    indexed_trail = None
-
-    if actual_end_d >= today:
-        error = "Set an **end date** before today to see how the price moved in the days after your sample."
-    else:
-        # Pull a few days *before* sample end so we always capture the last in-sample close, then find the
-        # true base bar (yfinance start/end quirks and holidays otherwise mis-align "tomorrow" vs month).
-        fwd_cal = max(
-            pd.Timestamp(today) + pd.Timedelta(days=14),
-            pd.Timestamp(actual_end_d) + pd.Timedelta(days=400),
-        )
-        slice_end = (fwd_cal + pd.Timedelta(days=1)).date()
-        dl_start = (pd.Timestamp(actual_end_d) - pd.Timedelta(days=21)).date()
-        close = download_asset_close_slice(asset_ticker, dl_start, slice_end, refresh_run_key)
-        if close is None or len(close) < 2:
-            error = "Could not load enough price history after your end date."
-        else:
-            dates = [pd.Timestamp(dt).date() for dt in close.index]
-            base_idx = None
-            for i, d in enumerate(dates):
-                if d == actual_end_d:
-                    base_idx = i
-                    break
-            if base_idx is None:
-                for i in range(len(dates) - 1, -1, -1):
-                    if dates[i] <= actual_end_d:
-                        base_idx = i
-                        break
-            if base_idx is None:
-                for i, d in enumerate(dates):
-                    if d >= actual_end_d:
-                        base_idx = i
-                        break
-            if base_idx is None:
-                error = "Could not line up your end date with downloaded prices."
-            else:
-                last_i = len(close) - 1
-                seg = close.iloc[base_idx : last_i + 1].astype(float)
-                indexed_trail = seg / float(seg.iloc[0]) * 100.0
-                for h, title in FORWARD_DIRECTION_HORIZONS:
-                    if h == 1:
-                        if base_idx + 1 >= len(close):
-                            snapshots.append(
-                                {
-                                    "title": title,
-                                    "sessions": h,
-                                    "word": "No data",
-                                    "return": None,
-                                    "partial": False,
-                                    "sessions_used": None,
-                                }
-                            )
-                            continue
-                        target_i = base_idx + 1
-                        partial = False
-                    else:
-                        # Need at least one bar after the sample-end close (same requirement as "Tomorrow").
-                        if last_i <= base_idx:
-                            snapshots.append(
-                                {
-                                    "title": title,
-                                    "sessions": h,
-                                    "word": "No data",
-                                    "return": None,
-                                    "partial": False,
-                                    "sessions_used": None,
-                                }
-                            )
-                            continue
-                        target_i = min(base_idx + h, last_i)
-                        if target_i <= base_idx:
-                            snapshots.append(
-                                {
-                                    "title": title,
-                                    "sessions": h,
-                                    "word": "No data",
-                                    "return": None,
-                                    "partial": False,
-                                    "sessions_used": None,
-                                }
-                            )
-                            continue
-                        # If only one session exists after the sample end, month/quarter still show that
-                        # move (partial), matching "Tomorrow" until more history exists.
-                        partial = target_i < base_idx + h
-
-                    r = float(close.iloc[target_i] / close.iloc[base_idx] - 1.0)
-                    word, _ = _forward_return_direction_label(r)
-                    sessions_used = int(target_i - base_idx)
-                    snapshots.append(
-                        {
-                            "title": title,
-                            "sessions": h,
-                            "word": word,
-                            "return": r,
-                            "partial": partial,
-                            "sessions_used": sessions_used,
-                        }
-                    )
-                if not any(s.get("return") is not None for s in snapshots):
-                    error = "Not enough trading days after your end date—try an earlier end date."
-
-    return {"snapshots": snapshots, "error": error, "indexed_trail": indexed_trail}
-
-
-def render_prediction_sense_check(prediction, metrics, asset_ticker, *, show_heading=True, refresh_run_key=""):
-    out = build_forward_direction_snapshot(metrics, asset_ticker, refresh_run_key)
-    if show_heading:
-        st.markdown("#### After your sample ended")
-    if out["error"]:
-        st.info(out["error"])
-        return
-
-    line_bits = []
-    for s in out["snapshots"]:
-        if s.get("return") is None:
-            line_bits.append(f"**{s['title']}** —")
-        else:
-            extra = f" ({s['sessions_used']} sess.)" if s.get("partial") else ""
-            line_bits.append(f"**{s['title']}** {s['word']} **{s['return']:+.2%}**{extra}")
-    st.markdown(" · ".join(line_bits))
-
-    tr = out.get("indexed_trail")
-    if tr is not None and len(tr) > 1:
-        x = np.arange(len(tr), dtype=int)
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=tr.values,
-                mode="lines",
-                line=dict(color="rgba(99, 110, 250, 0.95)", width=2.2),
-                fill="tozeroy",
-                fillcolor="rgba(99, 110, 250, 0.09)",
-                hovertemplate="+%{x} sessions<br>Index %{y:.2f}<extra></extra>",
-            )
-        )
-        mx, my, ml = [], [], []
-        for h, title in FORWARD_DIRECTION_HORIZONS:
-            xi = min(h, len(tr) - 1)
-            mx.append(int(xi))
-            my.append(float(tr.iloc[xi]))
-            ml.append("Next session" if h == 1 else f"~{h} sess.")
-        seen = set()
-        mx2, my2, ml2 = [], [], []
-        for xi, yi, lab in zip(mx, my, ml):
-            if xi in seen:
-                continue
-            seen.add(xi)
-            mx2.append(xi)
-            my2.append(yi)
-            ml2.append(lab)
-        fig.add_trace(
-            go.Scatter(
-                x=mx2,
-                y=my2,
-                mode="markers+text",
-                text=ml2,
-                textposition="top center",
-                marker=dict(size=9, color="#EF553B", line=dict(width=1, color="white")),
-                textfont=dict(size=10),
-                hovertemplate="+%{x} sessions<br>Index %{y:.2f}<extra></extra>",
-                showlegend=False,
-            )
-        )
-        fig.update_layout(
-            height=275,
-            margin=dict(l=8, r=8, t=40, b=40),
-            title=dict(
-                text="Indexed path (100 = last day in your sample)—realized data, not a forecast",
-                font=dict(size=12),
-            ),
-            xaxis_title="Trading sessions after sample end",
-            yaxis_title="Index",
-            showlegend=False,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(245,246,250,0.75)",
-        )
-        fig.update_yaxes(zeroline=False)
-        fig.update_xaxes(zeroline=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-
 def render_prediction_button():
     if st.button("View Prediction Details", type="primary"):
         st.session_state["analysis_view"] = "prediction"
@@ -1925,8 +1698,6 @@ def render_prediction_detail_page(
         st.caption(format_market_caption(market_snapshot))
 
     render_fundamentals_section(prediction)
-
-    render_prediction_sense_check(prediction, metrics, asset_ticker, show_heading=True, refresh_run_key=refresh_run_key)
 
     left, right = st.columns(2)
     with left:
@@ -2034,8 +1805,6 @@ def render_single_asset_dashboard(
     st.caption(prediction["risk_text"])
     render_fundamentals_section(prediction)
     render_prediction_button()
-    with st.expander("After sample end: summary + indexed price path"):
-        render_prediction_sense_check(prediction, metrics, asset_ticker, show_heading=False, refresh_run_key=refresh_run_key)
 
     if prediction["grouped_articles"]:
         with st.expander("Latest Evidence Used for Context"):
