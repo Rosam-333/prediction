@@ -64,6 +64,13 @@ FORWARD_DIRECTION_HORIZONS = (
     (TRADING_DAYS_PER_QUARTER, "After about three months"),
 )
 
+
+def _crypto_short_name(ui_label: str, yahoo_ticker: str) -> str:
+    """Strip trailing ' (TICKER)' from Streamlit select labels like 'Bitcoin (BTC-USD)'."""
+    suf = f" ({yahoo_ticker})"
+    return ui_label[: -len(suf)] if ui_label.endswith(suf) else ui_label
+
+
 gif_path = Path(__file__).with_name("finance.gif")
 
 st.markdown("### EASY INVESTMENT")
@@ -1827,11 +1834,25 @@ def render_fundamentals_section(prediction):
     fs = (prediction or {}).get("fundamentals_summary")
     if fs is None:
         return
-    with st.expander("Financial statements (income statement, balance sheet, cash flow)", expanded=False):
+    crypto_stub = not fs.get("available") and any(
+        "crypto" in (n or "").lower() for n in (fs.get("statement_notes") or [])
+    )
+    expander_title = (
+        "Financial statements (not used for crypto)"
+        if crypto_stub
+        else "Financial statements (income statement, balance sheet, cash flow)"
+    )
+    with st.expander(expander_title, expanded=False):
+        if crypto_stub:
+            st.caption(
+                "Digital assets do not have issuer income statements here. Outlook uses price vs your benchmark, "
+                "rolling idiosyncratic volatility, and news or social context when configured."
+            )
+            return
         if not fs.get("available"):
             for note in fs.get("statement_notes") or []:
                 st.caption(note)
-            st.info("No parsed statement data for this symbol (typical for some listings or crypto).")
+            st.info("No parsed statement data for this symbol (typical for some listings).")
             return
         for line in fs.get("highlights") or []:
             st.markdown(f"- {line}")
@@ -1986,7 +2007,8 @@ def render_single_asset_dashboard(
     ctx1.metric("Current Rolling IVOL", f"{metrics['rolling_iv_current']:.2%}" if pd.notna(metrics["rolling_iv_current"]) else "N/A")
     ctx2.metric("Average Rolling IVOL", f"{metrics['rolling_iv_average']:.2%}" if pd.notna(metrics["rolling_iv_average"]) else "N/A")
     ctx3.metric("IVOL Percentile", f"{ivol_percentile:.0f}th" if pd.notna(ivol_percentile) else "N/A")
-    ctx4.metric("Firm-Specific Share of Risk", f"{idio_share:.0%}" if pd.notna(idio_share) else "N/A")
+    idio_share_label = "Benchmark-Specific Share of Risk" if profile.get("sector") == "Digital Asset" else "Firm-Specific Share of Risk"
+    ctx4.metric(idio_share_label, f"{idio_share:.0%}" if pd.notna(idio_share) else "N/A")
 
     st.subheader("Risk Interpretation")
     st.info(f"**Risk Profile:** {risk_profile}")
@@ -2407,8 +2429,10 @@ if asset_universe == "S&P 500 Stocks":
 
 else:
     if analysis_mode == "Single Crypto":
-        crypto_ticker = CRYPTO_OPTIONS[analysis_request["selected_crypto_label"]]
-        benchmark_ticker = CRYPTO_OPTIONS[analysis_request["selected_crypto_benchmark"]]
+        ui_crypto_label = analysis_request["selected_crypto_label"]
+        ui_benchmark_label = analysis_request["selected_crypto_benchmark"]
+        crypto_ticker = CRYPTO_OPTIONS[ui_crypto_label]
+        benchmark_ticker = CRYPTO_OPTIONS[ui_benchmark_label]
         frame = load_asset_vs_benchmark(
             crypto_ticker, benchmark_ticker, start_date, end_date, refresh_run_key
         )
@@ -2416,7 +2440,12 @@ else:
             st.error("Crypto data could not be loaded for the chosen date range.")
             st.stop()
         _, enriched, metrics = compute_analysis(frame, rolling_window)
-        profile = {"name": analysis_request["selected_crypto_label"].replace(f" ({crypto_ticker})", ""), "sector": "Digital Asset", "industry": "Cryptocurrency"}
+        profile = {
+            "name": _crypto_short_name(ui_crypto_label, crypto_ticker),
+            "sector": "Digital Asset",
+            "industry": "Cryptocurrency",
+            "country": None,
+        }
         risk_profile = classify_risk_profile(metrics["r_squared"], metrics["idio_vol_annual"], metrics["total_vol_annual"])
         market_snapshot = get_market_snapshot(crypto_ticker, refresh_run_key)
         fundamentals_summary = {"available": False, "statement_notes": ["Fundamental statements are not modeled for crypto in this build."]}
@@ -2441,13 +2470,17 @@ else:
             classified_context,
             fundamentals_summary=fundamentals_summary,
         )
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(f"**Asset:** {profile['name']} (`{crypto_ticker}`)")
+        st.sidebar.markdown(f"**Benchmark:** {ui_benchmark_label}")
+        st.sidebar.caption("Idiosyncratic volatility is residual risk vs this benchmark pair (not SPY).")
         render_date_messages(metrics, start_date, end_date)
         if st.session_state.get("analysis_view") == "prediction":
             render_prediction_detail_page(
                 profile["name"],
                 crypto_ticker,
                 profile,
-                benchmark_ticker,
+                ui_benchmark_label,
                 metrics,
                 risk_profile,
                 market_snapshot,
@@ -2456,10 +2489,10 @@ else:
             )
         else:
             render_single_asset_dashboard(
-                analysis_request["selected_crypto_label"],
+                profile["name"],
                 crypto_ticker,
                 profile,
-                benchmark_ticker,
+                ui_benchmark_label,
                 enriched,
                 metrics,
                 prediction,
@@ -2468,9 +2501,12 @@ else:
             )
 
     else:
-        crypto_ticker_a = CRYPTO_OPTIONS[analysis_request["selected_crypto_a"]]
-        crypto_ticker_b = CRYPTO_OPTIONS[analysis_request["selected_crypto_b"]]
-        benchmark_ticker = CRYPTO_OPTIONS[analysis_request["selected_crypto_benchmark"]]
+        ui_crypto_a = analysis_request["selected_crypto_a"]
+        ui_crypto_b = analysis_request["selected_crypto_b"]
+        ui_benchmark_label = analysis_request["selected_crypto_benchmark"]
+        crypto_ticker_a = CRYPTO_OPTIONS[ui_crypto_a]
+        crypto_ticker_b = CRYPTO_OPTIONS[ui_crypto_b]
+        benchmark_ticker = CRYPTO_OPTIONS[ui_benchmark_label]
         frame_a = load_asset_vs_benchmark(
             crypto_ticker_a, benchmark_ticker, start_date, end_date, refresh_run_key
         )
@@ -2482,18 +2518,40 @@ else:
             st.stop()
         _, enriched_a, metrics_a = compute_analysis(frame_a, rolling_window)
         _, enriched_b, metrics_b = compute_analysis(frame_b, rolling_window)
-        profile_a = {"name": analysis_request["selected_crypto_a"].replace(f" ({crypto_ticker_a})", ""), "sector": "Digital Asset", "industry": "Cryptocurrency"}
-        profile_b = {"name": analysis_request["selected_crypto_b"].replace(f" ({crypto_ticker_b})", ""), "sector": "Digital Asset", "industry": "Cryptocurrency"}
+        profile_a = {
+            "name": _crypto_short_name(ui_crypto_a, crypto_ticker_a),
+            "sector": "Digital Asset",
+            "industry": "Cryptocurrency",
+            "country": None,
+        }
+        profile_b = {
+            "name": _crypto_short_name(ui_crypto_b, crypto_ticker_b),
+            "sector": "Digital Asset",
+            "industry": "Cryptocurrency",
+            "country": None,
+        }
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(f"**Crypto 1:** {profile_a['name']} (`{crypto_ticker_a}`)")
+        st.sidebar.markdown(f"**Crypto 2:** {profile_b['name']} (`{crypto_ticker_b}`)")
+        st.sidebar.markdown(f"**Benchmark:** {ui_benchmark_label}")
         render_date_messages(metrics_a, start_date, end_date)
         render_compare_dashboard(
-            analysis_request["selected_crypto_a"], crypto_ticker_a, profile_a, enriched_a, metrics_a,
-            analysis_request["selected_crypto_b"], crypto_ticker_b, profile_b, enriched_b, metrics_b,
-            benchmark_ticker,
+            profile_a["name"],
+            crypto_ticker_a,
+            profile_a,
+            enriched_a,
+            metrics_a,
+            profile_b["name"],
+            crypto_ticker_b,
+            profile_b,
+            enriched_b,
+            metrics_b,
+            ui_benchmark_label,
             refresh_run_key=refresh_run_key,
         )
 
 st.caption(
-    "Method: CAPM-style regression of asset daily returns on a chosen benchmark return. "
-    "Idiosyncratic volatility is measured as the standard deviation of regression residuals. "
-    "The S&P 500 screener uses the current constituent list and may take longer to load."
+    "Method: CAPM-style regression of daily returns on a benchmark (SPY for U.S. large-cap stocks; a crypto pair you choose for digital assets). "
+    "Idiosyncratic volatility is the annualized standard deviation of regression residuals. "
+    "The S&P 500 screener uses the current index list and may take longer to run."
 )
