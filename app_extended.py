@@ -1567,8 +1567,6 @@ def get_news_context(
         all_articles.extend(curated)
         for item in curated:
             source_counts[item["source"]] = source_counts.get(item["source"], 0) + 1
-    else:
-        coverage_notes.append("Curated policy and market RSS feeds did not return relevant matches.")
 
     for item in results["country_cb"]:
         all_articles.append(item)
@@ -1579,11 +1577,6 @@ def get_news_context(
     if gdelt_articles:
         all_articles.extend(gdelt_articles)
         source_counts["GDELT"] = source_counts.get("GDELT", 0) + len(gdelt_articles)
-    elif not fast_news:
-        coverage_notes.append(
-            "GDELT world-event coverage was unavailable for this run; major wires (Reuters, FT, Bloomberg, etc.) "
-            "are still queried via Google News site search, alongside NYTimes, CNN, BBC, Guardian, and other RSS feeds."
-        )
 
     yahoo_articles = results["yahoo"]
     if yahoo_articles:
@@ -1842,9 +1835,6 @@ def render_prediction_detail_page(
             "Local major-newspaper RSS runs when fast mode is off. Headlines stay relevance-filtered to the company, ticker, sector, or macro terms."
         )
 
-    if prediction["coverage_notes"]:
-        st.warning("Coverage guardrails: " + " ".join(prediction["coverage_notes"]))
-
 
 def render_single_asset_dashboard(
     asset_name,
@@ -1916,8 +1906,6 @@ def render_single_asset_dashboard(
                     else:
                         st.markdown(f"- {item['title']}")
                     st.caption(item.get("source") or item.get("source_type", "Source"))
-    elif prediction["coverage_notes"]:
-        st.info(" | ".join(prediction["coverage_notes"]))
 
     chart_tab1, chart_tab2, chart_tab3 = st.tabs(["Price Chart", "Return Scatter", "Rolling IVOL"])
     with chart_tab1:
@@ -2081,18 +2069,6 @@ def _safe_stock_label_index(labels, label):
 
 
 initialize_app_state()
-
-st.sidebar.header("Controls")
-st.sidebar.caption(
-    "Extended: multi-source news, fundamentals, prediction details, forward price direction. "
-    "Each **Run Analysis** refreshes prices, statements, quotes, and news (no stale 20‑minute news cache). "
-    "**Original** (quant only): `app.py` · **Yahoo + outlook:** `app_prediction.py`."
-)
-st.sidebar.caption(
-    "Optional: set `TWITTER_BEARER_TOKEN` or `X_BEARER_TOKEN` in `.streamlit/secrets.toml` or the environment "
-    "to pull **recent X posts** (official API v2; tier limits apply). In **smaller countries**, local chatter is often "
-    "heavier on **Facebook** than X—RSS and Google News still carry much of the formal press signal."
-)
 
 asset_universe = st.sidebar.radio("Asset Universe", ["S&P 500 Stocks", "Cryptocurrencies"])
 
