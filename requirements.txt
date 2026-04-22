@@ -1,9 +1,0 @@
-streamlit
-yfinance
-pandas
-numpy
-plotly
-statsmodels
-yahooquery
-requests
-feedparser
