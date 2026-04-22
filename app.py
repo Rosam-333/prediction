@@ -1,3 +1,8 @@
+"""
+Bob Cat Risk Lab (extended): multi-source news + prediction UI.
+Requires ``bobcat_lab_core.py`` in the same folder; on Streamlit Cloud, commit both files and use ``requirements.txt``.
+Run locally: ``streamlit run app_extended.py`` (do not ``import`` this module as a plain script).
+"""
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -1740,10 +1745,24 @@ stock_labels = stock_catalog["label"].tolist()
 stock_label_to_ticker = dict(zip(stock_catalog["label"], stock_catalog["ticker"]))
 default_stock_label = next((label for label in stock_labels if label.endswith("(AAPL)")), stock_labels[0] if stock_labels else "")
 
+
+def _safe_stock_label_index(labels, label):
+    """Avoid ValueError if the catalog drifts (e.g. AAPL/MSFT label shape changes)."""
+    if not labels:
+        return 0
+    try:
+        return labels.index(label)
+    except ValueError:
+        return 0
+
+
 initialize_app_state()
 
 st.sidebar.header("Controls")
-st.sidebar.caption("Extended build: multi-source news, prediction details, and forward sense-check. For the original Yahoo-only lab, run `app_classic.py` separately.")
+st.sidebar.caption(
+    "Extended: multi-source news, prediction details, sense-check. "
+    "**Original** (quant only): `app.py` · **Yahoo + outlook:** `app_prediction.py`."
+)
 
 asset_universe = st.sidebar.radio("Asset Universe", ["S&P 500 Stocks", "Cryptocurrencies"])
 
@@ -1754,11 +1773,17 @@ if asset_universe == "S&P 500 Stocks":
     )
 
     if analysis_mode == "Single Company":
-        selected_label = st.sidebar.selectbox("Search company name", stock_labels, index=stock_labels.index(default_stock_label))
+        selected_label = st.sidebar.selectbox(
+            "Search company name", stock_labels, index=_safe_stock_label_index(stock_labels, default_stock_label)
+        )
     elif analysis_mode == "Compare Two Companies":
-        selected_label_a = st.sidebar.selectbox("Company 1", stock_labels, index=stock_labels.index(default_stock_label))
+        selected_label_a = st.sidebar.selectbox(
+            "Company 1", stock_labels, index=_safe_stock_label_index(stock_labels, default_stock_label)
+        )
         default_b = next((label for label in stock_labels if label.endswith("(MSFT)")), stock_labels[1] if len(stock_labels) > 1 else stock_labels[0])
-        selected_label_b = st.sidebar.selectbox("Company 2", stock_labels, index=stock_labels.index(default_b))
+        selected_label_b = st.sidebar.selectbox(
+            "Company 2", stock_labels, index=_safe_stock_label_index(stock_labels, default_b)
+        )
     else:
         st.sidebar.caption("Runs a broad cross-sectional screen across the current S&P 500 list. This can take longer.")
 else:
