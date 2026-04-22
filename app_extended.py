@@ -1661,22 +1661,34 @@ def build_forward_direction_snapshot(metrics, asset_ticker, refresh_run_key=""):
     if actual_end_d >= today:
         error = "Set an **end date** before today to see how the price moved in the days after your sample."
     else:
-        # Long calendar span so yfinance returns enough daily rows; +1 day on end for yfinance’s exclusive end.
+        # Pull a few days *before* sample end so we always capture the last in-sample close, then find the
+        # true base bar (yfinance start/end quirks and holidays otherwise mis-align "tomorrow" vs month).
         fwd_cal = max(
             pd.Timestamp(today) + pd.Timedelta(days=14),
             pd.Timestamp(actual_end_d) + pd.Timedelta(days=400),
         )
         slice_end = (fwd_cal + pd.Timedelta(days=1)).date()
-        close = download_asset_close_slice(asset_ticker, actual_end_d, slice_end, refresh_run_key)
+        dl_start = (pd.Timestamp(actual_end_d) - pd.Timedelta(days=21)).date()
+        close = download_asset_close_slice(asset_ticker, dl_start, slice_end, refresh_run_key)
         if close is None or len(close) < 2:
             error = "Could not load enough price history after your end date."
         else:
+            dates = [pd.Timestamp(dt).date() for dt in close.index]
             base_idx = None
-            for i, dt in enumerate(close.index):
-                d = dt.date() if hasattr(dt, "date") else pd.Timestamp(dt).date()
-                if d >= actual_end_d:
+            for i, d in enumerate(dates):
+                if d == actual_end_d:
                     base_idx = i
                     break
+            if base_idx is None:
+                for i in range(len(dates) - 1, -1, -1):
+                    if dates[i] <= actual_end_d:
+                        base_idx = i
+                        break
+            if base_idx is None:
+                for i, d in enumerate(dates):
+                    if d >= actual_end_d:
+                        base_idx = i
+                        break
             if base_idx is None:
                 error = "Could not line up your end date with downloaded prices."
             else:
@@ -1700,7 +1712,8 @@ def build_forward_direction_snapshot(metrics, asset_ticker, refresh_run_key=""):
                         target_i = base_idx + 1
                         partial = False
                     else:
-                        if last_i <= base_idx + 1:
+                        # Need at least one bar after the sample-end close (same requirement as "Tomorrow").
+                        if last_i <= base_idx:
                             snapshots.append(
                                 {
                                     "title": title,
@@ -1713,7 +1726,7 @@ def build_forward_direction_snapshot(metrics, asset_ticker, refresh_run_key=""):
                             )
                             continue
                         target_i = min(base_idx + h, last_i)
-                        if target_i <= base_idx + 1:
+                        if target_i <= base_idx:
                             snapshots.append(
                                 {
                                     "title": title,
@@ -1725,6 +1738,8 @@ def build_forward_direction_snapshot(metrics, asset_ticker, refresh_run_key=""):
                                 }
                             )
                             continue
+                        # If only one session exists after the sample end, month/quarter still show that
+                        # move (partial), matching "Tomorrow" until more history exists.
                         partial = target_i < base_idx + h
 
                     r = float(close.iloc[target_i] / close.iloc[base_idx] - 1.0)
